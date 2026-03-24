@@ -1,0 +1,10 @@
+{
+    "targets": [
+        {
+            "name": "KKTIXtest",
+            "url": "https://kktix.com/events/a3e28733/registrations/new",
+            "type": "kktix",
+            "channel_id": 1234567890
+        }
+    ]
+}
