@@ -9,7 +9,7 @@ class KKTIXScraper(BaseScraper):
 
     def __init__(self, url: str):
         super().__init__(url, keyword="")
-        self.api_url = self.url.replace("/events/", "/g/events/").replace("/registrations/new", "/register_info")
+        self.api_url = self.url.replace("/events/", "/g/events/").replace("/registrations/new", "").rstrip("/")
         self.headers = {
             "Accept": "application/json",
             "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",

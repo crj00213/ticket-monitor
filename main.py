@@ -1,6 +1,5 @@
 import os
 from glob import glob
-
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -13,6 +12,7 @@ class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.guilds = True
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -20,6 +20,8 @@ class MyBot(commands.Bot):
         for cog_file in glob(f"{cogs_path}/*.py"):
             module_name = cog_file.replace("/", ".").replace("\\", ".").replace(".py", "")
             await self.load_extension(module_name)
+        synced = await self.tree.sync()
+        print(f"synced {len(synced)} commands: {[c.name for c in synced]}")
 
     async def on_ready(self):
         print(f"working: {self.user}")

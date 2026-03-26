@@ -11,3 +11,5 @@ config.json
 
 #註解備份
 mynote
+
+.vscode/

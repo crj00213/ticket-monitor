@@ -7,7 +7,35 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from scrapers.simple_scraper import SimpleScraper
-from scrapers.kktix_scraper import KktixScraper
+from scrapers.kktix_scraper import KKTIXScraper
+
+
+class DeleteSelect(discord.ui.Select):
+    def __init__(self, targets: list[dict], cog: "MonitorCog"):
+        self.cog = cog
+        options = [
+            discord.SelectOption(label=t["name"], value=t["name"])
+            for t in targets
+        ]
+        super().__init__(placeholder="選擇要刪除的票券...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        name = self.values[0]
+        current_targets = self.cog._load_targets()
+        new_targets = [t for t in current_targets if t["name"] != name]
+        if len(new_targets) == len(current_targets):
+            await interaction.response.send_message(f"找不到：{name}", ephemeral=True)
+            return
+        self.cog.targets = new_targets
+        self.cog.save_config()
+        self.cog.targets = self.cog._load_targets()
+        await interaction.response.edit_message(content=f"已刪除：{name}", view=None)
+
+
+class DeleteView(discord.ui.View):
+    def __init__(self, targets: list[dict], cog: "MonitorCog"):
+        super().__init__(timeout=30)
+        self.add_item(DeleteSelect(targets, cog))
 
 
 class MonitorCog(commands.Cog):
@@ -24,13 +52,22 @@ class MonitorCog(commands.Cog):
             config = json.load(f)
         return config.get("targets", [])
 
+    def save_config(self):
+        config_path = Path("config.json")
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        config["targets"] = self.targets
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=4)
+
     @tasks.loop(seconds=60)
     async def monitor_check(self):
-        for target in self.targets:
+        targets = self._load_targets()
+        for target in targets:
             scraper_type = target.get("type", "simple")
 
             if scraper_type == "kktix":
-                scraper = KktixScraper(url=target["url"])
+                scraper = KKTIXScraper(url=target["url"])
             else:
                 scraper = SimpleScraper(
                     url=target["url"],
@@ -56,8 +93,9 @@ class MonitorCog(commands.Cog):
                     continue
 
                 try:
+                    display_url = target['url'].replace("/register_info", "")
                     await channel.send(
-                        f"ticket EXIST!\n{target['url']}"
+                        f"ticket EXIST!\n{target['name']}: {display_url}"
                     )
                 except discord.Forbidden:
                     print(f"[ERROR] Bot does not have permission to send message in channel {channel.id}")
@@ -83,11 +121,47 @@ class MonitorCog(commands.Cog):
         for i, target in enumerate(self.targets, 1):
             embed.add_field(
                 name=f"{i}. {target['name']}",
-                value=f"URL: {target['url']}\nKeyword: {target['keyword']}",
+                value=f"URL: {target['url'].replace('/register_info', '')}\nKeyword: {target.get('keyword', '')}",
                 inline=False
             )
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="add_ticket", description="add ticket")
+    async def add_ticket(self, interaction: discord.Interaction, name: str, url: str):
+        url = url.rstrip("/")
+        if "register_info" not in url:
+            url = url + "/register_info"
+
+        current_targets = self._load_targets()
+        for t in current_targets:
+            if t["url"] == url:
+                await interaction.response.send_message(f"已存在相同 URL：{url.replace('/register_info', '')}", ephemeral=True)
+                return
+            if t["name"] == name:
+                await interaction.response.send_message(f"已存在相同名稱：{name}", ephemeral=True)
+                return
+
+        target = {
+            "name": name,
+            "type": "kktix",
+            "url": url,
+            "channel_id": interaction.channel_id
+        }
+        self.targets = current_targets
+        self.targets.append(target)
+        self.save_config()
+        self.targets = self._load_targets()
+        await interaction.response.send_message(f"already add {name}")
+
+    @app_commands.command(name="remove_ticket", description="remove ticket")
+    async def remove_ticket(self, interaction: discord.Interaction):
+        current_targets = self._load_targets()
+        if not current_targets:
+            await interaction.response.send_message("目前沒有監控中的票券。", ephemeral=True)
+            return
+        view = DeleteView(current_targets, self)
+        await interaction.response.send_message("請選擇要刪除的票券：", view=view, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
