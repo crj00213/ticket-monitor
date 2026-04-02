@@ -10,6 +10,84 @@ from scrapers.simple_scraper import SimpleScraper
 from scrapers.kktix_scraper import KKTIXScraper
 
 
+class PriceLabelModal(discord.ui.Modal, title="輸入票種金額"):
+    def __init__(self, selected_indices: list[str], id_map: dict[str, int], view: "TicketSelectView"):
+        super().__init__()
+        self.selected_indices = selected_indices
+        self.id_map = id_map
+        self.ticket_view = view
+        self.inputs: list[discord.ui.TextInput] = []
+
+        for i in selected_indices:
+            text_input = discord.ui.TextInput(
+                label=f"價位 {i} 的金額",
+                placeholder="例如 TWD$6,280",
+                max_length=10,
+                required=True
+            )
+            self.inputs.append(text_input)
+            self.add_item(text_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        view = self.ticket_view
+        watched_tickets = [
+            {"id": self.id_map[i], "label": self.inputs[n].value}
+            for n, i in enumerate(self.selected_indices)
+        ]
+        target = {
+            "name": view.name,
+            "type": "kktix",
+            "url": view.url,
+            "channel_id": view.channel_id,
+            "watched_tickets": watched_tickets,
+        }
+        current_targets = view.cog._load_targets()
+        current_targets.append(target)
+        view.cog.targets = current_targets
+        view.cog.save_config()
+        view.cog.targets = view.cog._load_targets()
+
+        labels = "、".join(w["label"] for w in watched_tickets)
+        await interaction.response.edit_message(
+            content=f"已新增 **{view.name}**，監控：{labels}",
+            view=None
+        )
+
+
+class TicketSelect(discord.ui.Select):
+    def __init__(self, sorted_tickets: list[dict]):
+        self.id_map = {str(i + 1): t["id"] for i, t in enumerate(sorted_tickets)}
+        n = len(sorted_tickets)
+        options = [
+            discord.SelectOption(label=str(i + 1), value=str(i + 1))
+            for i in range(n)
+        ]
+        super().__init__(
+            placeholder="請選擇您要監控的票券在網頁上是第幾個？（第一個請點擊１）",
+            min_values=1,
+            max_values=len(options),
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view: TicketSelectView = self.view  # type: ignore
+        selected_indices = sorted(self.values, key=lambda x: int(x))
+        modal = PriceLabelModal(selected_indices, self.id_map, view)
+        await interaction.response.send_modal(modal)
+
+
+class TicketSelectView(discord.ui.View):
+    def __init__(self, tickets: list[dict], name: str, url: str, channel_id: int, cog: "MonitorCog"):
+        super().__init__(timeout=60)
+        self.name = name
+        self.url = url
+        self.channel_id = channel_id
+        self.cog = cog
+
+        sorted_tickets = sorted(tickets, key=lambda x: x["id"])
+        self.add_item(TicketSelect(sorted_tickets))
+
+
 class DeleteSelect(discord.ui.Select):
     def __init__(self, targets: list[dict], cog: "MonitorCog"):
         self.cog = cog
@@ -68,13 +146,22 @@ class MonitorCog(commands.Cog):
 
             if scraper_type == "kktix":
                 scraper = KKTIXScraper(url=target["url"])
+                watched_tickets = target.get("watched_tickets")
+                if watched_tickets:
+                    ticket_ids = [t["id"] for t in watched_tickets]
+                    available_ids = await scraper.check_specific_tickets(ticket_ids)
+                    is_available = bool(available_ids)
+                    available_labels = [t["label"] for t in watched_tickets if t["id"] in available_ids]
+                else:
+                    is_available = await scraper.check_status()
+                    available_labels = []
             else:
                 scraper = SimpleScraper(
                     url=target["url"],
                     keyword=target["keyword"]
                 )
-
-            is_available = await scraper.check_status()
+                is_available = await scraper.check_status()
+                available_labels = []
 
             if is_available:
                 channel_id = target.get("channel_id")
@@ -94,8 +181,9 @@ class MonitorCog(commands.Cog):
 
                 try:
                     display_url = target['url'].replace("/register_info", "")
+                    ticket_info = f"\n票種：{', '.join(available_labels)}" if available_labels else ""
                     await channel.send(
-                        f"ticket EXIST!\n{target['name']}: {display_url}"
+                        f"ticket EXIST!\n{target['name']}: {display_url}{ticket_info}"
                     )
                 except discord.Forbidden:
                     print(f"[ERROR] Bot does not have permission to send message in channel {channel.id}")
@@ -142,17 +230,45 @@ class MonitorCog(commands.Cog):
                 await interaction.response.send_message(f"已存在相同名稱：{name}", ephemeral=True)
                 return
 
-        target = {
-            "name": name,
-            "type": "kktix",
-            "url": url,
-            "channel_id": interaction.channel_id
-        }
-        self.targets = current_targets
-        self.targets.append(target)
-        self.save_config()
-        self.targets = self._load_targets()
-        await interaction.response.send_message(f"already add {name}")
+        await interaction.response.defer(ephemeral=True)
+        scraper = KKTIXScraper(url=url)
+        tickets = await scraper.fetch_tickets()
+
+        if not tickets:
+            await interaction.followup.send("無法取得票種資訊，請確認 URL 是否正確。", ephemeral=True)
+            return
+
+        content = f"**{name}** 找到 {len(tickets)} 個票券，請對照 KKTIX 頁面選擇要監控的項目："
+        view = TicketSelectView(tickets, name, url, interaction.channel_id, self)
+        await interaction.followup.send(content, view=view, ephemeral=True)
+
+    @app_commands.command(name="inspect", description="查看活動的 sections 原始資料")
+    async def inspect(self, interaction: discord.Interaction, name: str):
+        targets = self._load_targets()
+        target = next((t for t in targets if t["name"] == name), None)
+        if not target:
+            await interaction.response.send_message(f"找不到：{name}", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        scraper = KKTIXScraper(url=target["url"])
+        sections = await scraper.fetch_sections()
+
+        if not sections:
+            await interaction.followup.send("沒有 sections 資料或抓取失敗", ephemeral=True)
+            return
+
+        lines = []
+        for i, s in enumerate(sections):
+            lines.append(f"**Section {i}**")
+            for k, v in s.items():
+                lines.append(f"  `{k}`: {v}")
+
+        text = "\n".join(lines)
+        if len(text) > 1900:
+            text = text[:1900] + "\n...(truncated)"
+
+        await interaction.followup.send(text, ephemeral=True)
 
     @app_commands.command(name="remove_ticket", description="remove ticket")
     async def remove_ticket(self, interaction: discord.Interaction):
